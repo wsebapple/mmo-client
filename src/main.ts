@@ -19,6 +19,11 @@ type EntityView = {
     hp: number;
     maxHp: number;
     targetId: number;
+
+    // ✅ 추가
+    level?: number;     // 서버가 보내면 표시
+    exp?: number;       // (선택) 서버가 보내면 HUD에 표시
+    expNeed?: number;   // (선택) 다음 레벨 필요 경험치
 };
 type StateDeltaPayload = { tick: number; updates: EntityView[]; removes: number[] };
 type CombatPayload = {
@@ -44,6 +49,24 @@ function screenToWorld(sx: number, sy: number) {
     const tx = (sy / (TILE_H / 2) + sx / (TILE_W / 2)) / 2;
     const ty = (sy / (TILE_H / 2) - sx / (TILE_W / 2)) / 2;
     return { x: tx, y: ty };
+}
+
+function formatLv(level?: number) {
+    return level == null ? "Lv?" : `Lv${level}`;
+}
+
+function entityHeadText(v: EntityView) {
+    const kind = v.kind as Kind;
+
+    if (kind === "D") return "DROP";
+
+    // 몬스터: HP/레벨 같이
+    if (kind === "M") {
+        return `M${v.id} ${formatLv(v.level)}  ${v.hp}/${v.maxHp}`;
+    }
+
+    // 플레이어: 레벨만(원하면 HP도 같이 가능)
+    return `P${v.id} ${formatLv(v.level)}`;
 }
 
 type Kind = "P" | "M" | "D";
@@ -128,6 +151,12 @@ class MainScene extends Phaser.Scene {
 
     // 옵션: 그리드 무겁다면 false
     drawGridEnabled = true;
+
+    // ✅ EXP HUD
+    expBarBg!: Phaser.GameObjects.Rectangle;
+    expBarFg!: Phaser.GameObjects.Rectangle;
+    expText!: Phaser.GameObjects.Text;
+    targetHpText!: Phaser.GameObjects.Text;
 
     create() {
         const cam = this.cameras.main;
@@ -345,7 +374,8 @@ class MainScene extends Phaser.Scene {
         r.c.x = px;
         r.c.y = py;
 
-        r.name.setText(kindLabel(kind, e.id));
+        const newText = entityHeadText(e);
+        if (r.name.text !== newText) r.name.setText(newText); // ✅ 텍스트 변경 있을 때만
 
         if (kind !== "D") {
             if (r.hpShown === -1) r.hpShown = e.hp; // 최초 싱크
@@ -355,7 +385,14 @@ class MainScene extends Phaser.Scene {
             this.myTargetId = e.targetId || 0;
             this.setMyHp(e.hp, e.maxHp);
             this.cameras.main.centerOn(px, py);
+            this.setMyLevelExp(e.level ?? 1, e.exp ?? 0, e.expNeed ?? 0);
         }
+    }
+
+    setMyLevelExp(level: number, exp: number, expNeed: number) {
+        const ratio = expNeed > 0 ? exp / expNeed : 0;
+        this.expBarFg.width = 216 * clamp01(ratio);
+        this.expText.setText(`LV ${level}  EXP ${exp}/${expNeed || "?"}`);
     }
 
     createEntityRender(id: number, kind: Kind): EntityRender {
@@ -371,7 +408,7 @@ class MainScene extends Phaser.Scene {
         if (body instanceof Phaser.GameObjects.Arc) body.setStrokeStyle(2, 0x111111, 0.9);
         if (body instanceof Phaser.GameObjects.Rectangle) body.setStrokeStyle(2, 0x111111, 0.9);
 
-        const name = this.add.text(-18, -30, kindLabel(kind, id), {
+        const name = this.add.text(-18, -30, kindLabel(kind, id, undefined), {
             fontSize: "10px",
             color: THEME.subText,
         });
@@ -443,7 +480,7 @@ class MainScene extends Phaser.Scene {
         if (!this.myTargetId) {
             this.targetRingOuter.setVisible(false);
             this.targetRingInner.setVisible(false);
-            this.setTargetFrame("대상 없음", 0, 1);
+            this.setTargetFrame("대상 없음", undefined, 0, 1);
             return;
         }
 
@@ -453,7 +490,7 @@ class MainScene extends Phaser.Scene {
         if (!t || !v) {
             this.targetRingOuter.setVisible(false);
             this.targetRingInner.setVisible(false);
-            this.setTargetFrame("대상 없음", 0, 1);
+            this.setTargetFrame("대상 없음", undefined, 0, 1);
             return;
         }
 
@@ -468,7 +505,12 @@ class MainScene extends Phaser.Scene {
         this.targetRingInner.y = t.c.y + 10;
         this.targetRingInner.setDepth(t.c.depth - 1);
 
-        this.setTargetFrame(kindLabel(v.kind as Kind, v.id), v.hp, v.maxHp);
+        this.setTargetFrame(
+            kindLabel(v.kind as Kind, v.id, v.level),
+            v.level,
+            v.hp,
+            v.maxHp
+        );
     }
 
     // ---------- Combat FX ----------
@@ -549,6 +591,24 @@ class MainScene extends Phaser.Scene {
         this.toastText.setAlpha(0);
         this.toastText.setScrollFactor(0);
         this.uiLayer.add(this.toastText);
+
+        this.expBarBg = this.add.rectangle(20, 60, 220, 10, 0x333333).setOrigin(0, 0);
+        this.expBarFg = this.add.rectangle(22, 62, 216, 6, 0x4da3ff).setOrigin(0, 0);
+        this.expText = this.add.text(20, 74, "LV 1  EXP 0/0", { fontSize: "12px", color: THEME.subText });
+
+        this.expBarBg.setScrollFactor(0);
+        this.expBarFg.setScrollFactor(0);
+        this.expText.setScrollFactor(0);
+
+        this.uiLayer.add([this.expBarBg, this.expBarFg, this.expText]);
+
+        this.targetHpText = this.add.text(tfX + 10, tfY + 38, "", {
+            fontSize: "11px",
+            color: THEME.subText,
+        });
+
+        this.targetHpText.setScrollFactor(0);
+        this.uiLayer.add(this.targetHpText);
     }
 
     setMyHp(hp: number, maxHp: number) {
@@ -557,10 +617,14 @@ class MainScene extends Phaser.Scene {
         this.hpText.setText(`HP ${hp}/${maxHp}`);
     }
 
-    setTargetFrame(name: string, hp: number, maxHp: number) {
-        this.targetName.setText(name);
+    setTargetFrame(name: string, level: number | undefined, hp: number, maxHp: number) {
+        const lv = level == null ? "Lv?" : `Lv${level}`;
+        this.targetName.setText(`${name}  ${lv}`);
+
         const ratio = maxHp > 0 ? hp / maxHp : 0;
         this.targetHpFg.width = 260 * clamp01(ratio);
+
+        this.targetHpText.setText(`HP ${hp}/${maxHp}`);
     }
 
     toast(msg: string) {
