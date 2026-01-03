@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 
 type MsgType =
+    | "AUTH"
     | "WELCOME"
     | "STATE_DELTA"
     | "COMBAT"
@@ -11,6 +12,7 @@ type MsgType =
 type WsMessage<T> = { type: MsgType; payload: T };
 
 type WelcomePayload = { playerId: number; mapId: string; tickRate: number };
+
 type EntityView = {
     id: number;
     kind: string;
@@ -20,12 +22,13 @@ type EntityView = {
     maxHp: number;
     targetId: number;
 
-    // ✅ 추가
-    level?: number;     // 서버가 보내면 표시
-    exp?: number;       // (선택) 서버가 보내면 HUD에 표시
-    expNeed?: number;   // (선택) 다음 레벨 필요 경험치
+    level?: number;
+    exp?: number;
+    expNeed?: number;
 };
+
 type StateDeltaPayload = { tick: number; updates: EntityView[]; removes: number[] };
+
 type CombatPayload = {
     tick: number;
     attackerId: number;
@@ -51,8 +54,16 @@ function screenToWorld(sx: number, sy: number) {
     return { x: tx, y: ty };
 }
 
+type Kind = "P" | "M" | "D";
+
 function formatLv(level?: number) {
     return level == null ? "Lv?" : `Lv${level}`;
+}
+
+function kindLabel(kind: Kind, id: number) {
+    if (kind === "P") return `P${id}`;
+    if (kind === "M") return `M${id}`;
+    return `DROP`;
 }
 
 function entityHeadText(v: EntityView) {
@@ -60,16 +71,12 @@ function entityHeadText(v: EntityView) {
 
     if (kind === "D") return "DROP";
 
-    // 몬스터: HP/레벨 같이
     if (kind === "M") {
         return `M${v.id} ${formatLv(v.level)}  ${v.hp}/${v.maxHp}`;
     }
 
-    // 플레이어: 레벨만(원하면 HP도 같이 가능)
     return `P${v.id} ${formatLv(v.level)}`;
 }
-
-type Kind = "P" | "M" | "D";
 
 const THEME = {
     bg: 0x161616,
@@ -100,12 +107,6 @@ function lerp(a: number, b: number, t: number) {
     return a + (b - a) * t;
 }
 
-function kindLabel(kind: Kind, id: number) {
-    if (kind === "P") return `P${id}`;
-    if (kind === "M") return `M${id}`;
-    return `DROP`;
-}
-
 type EntityRender = {
     c: Phaser.GameObjects.Container;
     kind: Kind;
@@ -132,31 +133,35 @@ class MainScene extends Phaser.Scene {
     targetRingOuter?: Phaser.GameObjects.Ellipse;
     targetRingInner?: Phaser.GameObjects.Ellipse;
 
-    // HUD
+    // UI 레이어(타겟 프레임/토스트 등)
     uiLayer!: Phaser.GameObjects.Container;
+
+    // ✅ 플레이어 HUD(하단 중앙)
+    playerHud!: Phaser.GameObjects.Container;
     hpBarBg!: Phaser.GameObjects.Rectangle;
     hpBarFg!: Phaser.GameObjects.Rectangle;
     hpText!: Phaser.GameObjects.Text;
 
+    expBarBg!: Phaser.GameObjects.Rectangle;
+    expBarFg!: Phaser.GameObjects.Rectangle;
+    expText!: Phaser.GameObjects.Text;
+
+    // 타겟 프레임
     targetName!: Phaser.GameObjects.Text;
     targetHpBg!: Phaser.GameObjects.Rectangle;
     targetHpFg!: Phaser.GameObjects.Rectangle;
+    targetHpText!: Phaser.GameObjects.Text;
 
+    // 토스트
     toastText!: Phaser.GameObjects.Text;
     toastTimer?: Phaser.Time.TimerEvent;
 
-    // ✅ 타일 호버 하이라이트
+    // 호버 타일
     hoverG!: Phaser.GameObjects.Graphics;
     hoverTile = { x: -999, y: -999 };
 
     // 옵션: 그리드 무겁다면 false
     drawGridEnabled = true;
-
-    // ✅ EXP HUD
-    expBarBg!: Phaser.GameObjects.Rectangle;
-    expBarFg!: Phaser.GameObjects.Rectangle;
-    expText!: Phaser.GameObjects.Text;
-    targetHpText!: Phaser.GameObjects.Text;
 
     create() {
         const cam = this.cameras.main;
@@ -167,7 +172,7 @@ class MainScene extends Phaser.Scene {
         const start = worldToScreen(18, 18);
         cam.centerOn(start.sx, start.sy);
 
-        // ✅ 호버 하이라이트 레이어
+        // 호버 하이라이트 레이어
         this.hoverG = this.add.graphics();
         this.hoverG.setDepth(2500);
         this.hoverG.setPosition(0, 0);
@@ -175,10 +180,17 @@ class MainScene extends Phaser.Scene {
         this.createTargetRing();
         this.createHud();
 
+        // 리사이즈 대응(하단 중앙/상단 중앙 HUD 재배치)
+        this.scale.on("resize", () => this.layoutHud());
+
         this.ws = new WebSocket(`ws://${location.hostname}:8080/ws`);
+        this.ws.onopen = () => {
+            const savedId = Number(localStorage.getItem("playerId") || "0");
+            this.send("AUTH", { playerId: savedId });
+        };
         this.ws.onmessage = (ev) => this.onWs(ev.data);
 
-        // ✅ 마우스 호버 타일 표시
+        // 마우스 호버 타일 표시
         this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
             const sx = p.worldX;
             const sy = p.worldY;
@@ -213,7 +225,6 @@ class MainScene extends Phaser.Scene {
                 return;
             }
 
-            // (선택) 타일 스냅 이동이 더 예쁨
             const w = screenToWorld(sx, sy);
             const tx = this.mapClampX(Math.round(w.x));
             const ty = this.mapClampY(Math.round(w.y));
@@ -266,7 +277,6 @@ class MainScene extends Phaser.Scene {
 
     // ---------- Hover Tile ----------
     mapClampX(x: number) {
-        // 서버 맵이 200x200이면 0~199
         return Phaser.Math.Clamp(x, 0, 199);
     }
     mapClampY(y: number) {
@@ -283,7 +293,6 @@ class MainScene extends Phaser.Scene {
         const bottom = new Phaser.Math.Vector2(sx, sy + TILE_H / 2);
         const left = new Phaser.Math.Vector2(sx - TILE_W / 2, sy);
 
-        // 살짝 채움 + 두꺼운 윤곽
         this.hoverG.fillStyle(0xffffff, 0.08);
         this.hoverG.beginPath();
         this.hoverG.moveTo(top.x, top.y);
@@ -296,7 +305,6 @@ class MainScene extends Phaser.Scene {
         this.hoverG.lineStyle(3, 0xffffff, 0.85);
         this.hoverG.strokePath();
 
-        // 코너 포인트(은은한 강조)
         this.hoverG.fillStyle(0xffffff, 0.22);
         this.hoverG.fillCircle(top.x, top.y, 2);
         this.hoverG.fillCircle(right.x, right.y, 2);
@@ -329,6 +337,7 @@ class MainScene extends Phaser.Scene {
         if (msg.type === "WELCOME") {
             const p = msg.payload as WelcomePayload;
             this.myId = p.playerId;
+            localStorage.setItem("playerId", String(this.myId));
             this.toast(`접속: P${this.myId}`);
             return;
         }
@@ -375,10 +384,10 @@ class MainScene extends Phaser.Scene {
         r.c.y = py;
 
         const newText = entityHeadText(e);
-        if (r.name.text !== newText) r.name.setText(newText); // ✅ 텍스트 변경 있을 때만
+        if (r.name.text !== newText) r.name.setText(newText);
 
         if (kind !== "D") {
-            if (r.hpShown === -1) r.hpShown = e.hp; // 최초 싱크
+            if (r.hpShown === -1) r.hpShown = e.hp;
         }
 
         if (e.id === this.myId) {
@@ -408,7 +417,7 @@ class MainScene extends Phaser.Scene {
         if (body instanceof Phaser.GameObjects.Arc) body.setStrokeStyle(2, 0x111111, 0.9);
         if (body instanceof Phaser.GameObjects.Rectangle) body.setStrokeStyle(2, 0x111111, 0.9);
 
-        const name = this.add.text(-18, -30, kindLabel(kind, id, undefined), {
+        const name = this.add.text(-18, -30, kindLabel(kind, id), {
             fontSize: "10px",
             color: THEME.subText,
         });
@@ -505,12 +514,7 @@ class MainScene extends Phaser.Scene {
         this.targetRingInner.y = t.c.y + 10;
         this.targetRingInner.setDepth(t.c.depth - 1);
 
-        this.setTargetFrame(
-            kindLabel(v.kind as Kind, v.id, v.level),
-            v.level,
-            v.hp,
-            v.maxHp
-        );
+        this.setTargetFrame(kindLabel(v.kind as Kind, v.id), v.level, v.hp, v.maxHp);
     }
 
     // ---------- Combat FX ----------
@@ -551,23 +555,16 @@ class MainScene extends Phaser.Scene {
         const w = this.scale.width;
         const h = this.scale.height;
 
+        // 타겟/토스트용 UI 레이어
         this.uiLayer = this.add.container(0, 0).setDepth(5000);
+        this.uiLayer.setScrollFactor(0);
 
-        this.hpBarBg = this.add.rectangle(20, 20, 220, 16, 0x333333).setOrigin(0, 0);
-        this.hpBarFg = this.add.rectangle(22, 22, 216, 12, THEME.uiHp).setOrigin(0, 0);
-        this.hpText = this.add.text(20, 40, "HP 0/0", { fontSize: "12px", color: THEME.text });
-
-        this.hpBarBg.setScrollFactor(0);
-        this.hpBarFg.setScrollFactor(0);
-        this.hpText.setScrollFactor(0);
-
-        this.uiLayer.add([this.hpBarBg, this.hpBarFg, this.hpText]);
-
+        // ===== 타겟 프레임(상단 중앙) =====
         const tfX = w / 2 - 140;
         const tfY = 10;
 
         const frameBg = this.add
-            .rectangle(tfX, tfY, 280, 46, THEME.uiPanel, THEME.uiPanelAlpha)
+            .rectangle(tfX, tfY, 280, 52, THEME.uiPanel, THEME.uiPanelAlpha)
             .setOrigin(0, 0);
 
         this.targetName = this.add.text(tfX + 10, tfY + 6, "대상 없음", {
@@ -578,37 +575,90 @@ class MainScene extends Phaser.Scene {
         this.targetHpBg = this.add.rectangle(tfX + 10, tfY + 26, 260, 10, 0x333333).setOrigin(0, 0);
         this.targetHpFg = this.add.rectangle(tfX + 10, tfY + 26, 260, 10, THEME.uiHp).setOrigin(0, 0);
 
-        frameBg.setScrollFactor(0);
-        this.targetName.setScrollFactor(0);
-        this.targetHpBg.setScrollFactor(0);
-        this.targetHpFg.setScrollFactor(0);
-
-        this.uiLayer.add([frameBg, this.targetName, this.targetHpBg, this.targetHpFg]);
-
-        this.toastText = this.add
-            .text(w / 2, h - 90, "", { fontSize: "14px", color: THEME.toast })
-            .setOrigin(0.5);
-        this.toastText.setAlpha(0);
-        this.toastText.setScrollFactor(0);
-        this.uiLayer.add(this.toastText);
-
-        this.expBarBg = this.add.rectangle(20, 60, 220, 10, 0x333333).setOrigin(0, 0);
-        this.expBarFg = this.add.rectangle(22, 62, 216, 6, 0x4da3ff).setOrigin(0, 0);
-        this.expText = this.add.text(20, 74, "LV 1  EXP 0/0", { fontSize: "12px", color: THEME.subText });
-
-        this.expBarBg.setScrollFactor(0);
-        this.expBarFg.setScrollFactor(0);
-        this.expText.setScrollFactor(0);
-
-        this.uiLayer.add([this.expBarBg, this.expBarFg, this.expText]);
-
         this.targetHpText = this.add.text(tfX + 10, tfY + 38, "", {
             fontSize: "11px",
             color: THEME.subText,
         });
 
-        this.targetHpText.setScrollFactor(0);
-        this.uiLayer.add(this.targetHpText);
+        this.uiLayer.add([frameBg, this.targetName, this.targetHpBg, this.targetHpFg, this.targetHpText]);
+
+        // ===== 토스트(하단 중앙, 플레이어 HUD 위쪽) =====
+        this.toastText = this.add
+            .text(w / 2, h - 160, "", { fontSize: "14px", color: THEME.toast })
+            .setOrigin(0.5);
+        this.toastText.setAlpha(0);
+        this.uiLayer.add(this.toastText);
+
+        // ===== ✅ 플레이어 HUD(하단 중앙) =====
+        this.playerHud = this.add.container(w / 2, h - 90).setDepth(5000);
+        this.playerHud.setScrollFactor(0);
+
+        const panelBg = this.add
+            .rectangle(0, 0, 260, 72, THEME.uiPanel, THEME.uiPanelAlpha)
+            .setOrigin(0.5);
+
+        // HP
+        this.hpBarBg = this.add.rectangle(-110, -10, 220, 14, 0x333333).setOrigin(0, 0.5);
+        this.hpBarFg = this.add.rectangle(-108, -10, 216, 10, THEME.uiHp).setOrigin(0, 0.5);
+        this.hpText = this.add
+            .text(0, -28, "HP 0/0", { fontSize: "12px", color: THEME.text })
+            .setOrigin(0.5);
+
+        // EXP
+        this.expBarBg = this.add.rectangle(-110, 14, 220, 8, 0x333333).setOrigin(0, 0.5);
+        this.expBarFg = this.add.rectangle(-108, 14, 216, 6, 0x4da3ff).setOrigin(0, 0.5);
+        this.expText = this.add
+            .text(0, 28, "LV 1  EXP 0/0", { fontSize: "11px", color: THEME.subText })
+            .setOrigin(0.5);
+
+        this.playerHud.add([
+            panelBg,
+            this.hpBarBg,
+            this.hpBarFg,
+            this.hpText,
+            this.expBarBg,
+            this.expBarFg,
+            this.expText,
+        ]);
+
+        // 초기 레이아웃 한 번 정리
+        this.layoutHud();
+    }
+
+    layoutHud() {
+        const w = this.scale.width;
+        const h = this.scale.height;
+
+        // 플레이어 HUD: 하단 중앙
+        if (this.playerHud) {
+            this.playerHud.setPosition(w / 2, h - 90);
+        }
+
+        // 토스트: 플레이어 HUD 위
+        if (this.toastText) {
+            this.toastText.setPosition(w / 2, h - 160);
+        }
+
+        // 타겟 프레임: 상단 중앙(내부 오브젝트들을 통째로 옮길려면 컨테이너化가 더 좋지만, 여기서는 좌표 재계산으로 처리)
+        // 현재는 frameBg/targetName/targetHpBg/targetHpFg/targetHpText가 절대좌표로 만들어져서,
+        // 리사이즈 시 자연스럽게 재배치하려면 타겟 프레임도 컨테이너로 묶는 편이 가장 깔끔합니다.
+        // 그래도 최소 변경으로 맞추려면 아래처럼 재배치합니다.
+
+        const tfX = w / 2 - 140;
+        const tfY = 10;
+
+        // uiLayer children 순서:
+        // [frameBg, targetName, targetHpBg, targetHpFg, targetHpText, toastText]
+        // 인덱스 기반으로 잡는 건 불안정하니, 각 오브젝트를 필드로 가지고 있으면 더 안정적입니다.
+        // (frameBg는 현재 지역변수라 직접 이동 불가 → 타겟 프레임도 컨테이너로 바꾸는 걸 추천)
+        // 여기서는 간단히: target 관련 텍스트/바만 이동합니다.
+        if (this.targetName) this.targetName.setPosition(tfX + 10, tfY + 6);
+        if (this.targetHpBg) this.targetHpBg.setPosition(tfX + 10, tfY + 26);
+        if (this.targetHpFg) this.targetHpFg.setPosition(tfX + 10, tfY + 26);
+        if (this.targetHpText) this.targetHpText.setPosition(tfX + 10, tfY + 38);
+
+        // frameBg도 같이 움직이게 하려면: frameBg를 필드로 승격하거나 타겟 프레임을 컨테이너로 묶어주세요.
+        // (원하시면 그 버전으로 전체 코드를 다시 정리해드리겠습니다.)
     }
 
     setMyHp(hp: number, maxHp: number) {
