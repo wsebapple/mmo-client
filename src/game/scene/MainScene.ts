@@ -13,7 +13,6 @@ import { createToast, showToast, type Toast } from "../ui/toast";
 import { pickEntityAtScreen, screenToTile } from "../input/pointer";
 import {THEME} from "../theme/theme";
 import type { TargetRing } from "../ui/targetRing";
-import {drawIsoGrid} from "../render/grid";
 import {createGrassMap} from "../render/grassMap";
 
 export class MainScene extends Phaser.Scene {
@@ -46,7 +45,7 @@ export class MainScene extends Phaser.Scene {
 
         if (this.drawGridEnabled) {
             // this.gridG = drawIsoGrid(this, 120, 120);
-            this.grassLayer = createGrassMap(this, 120, 120);
+            this.grassLayer = createGrassMap(this, 200, 200);
         }
 
         const start = worldToScreen(18, 18);
