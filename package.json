@@ -1,0 +1,17 @@
+{
+  "name": "mmo-client",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "phaser": "^3.80.1"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "typescript": "^5.5.4"
+  }
+}
